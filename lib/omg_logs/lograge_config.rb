@@ -70,18 +70,17 @@ module OmgLogs
 
         def format_request_log(data)
           status_color = case data[:status].to_i
-                         when 200..299 then :light_green
-                         when 300..399 then :light_yellow
-                         when 400..499 then :light_red
-                         when 500..599 then :light_magenta
-                         else :white
-                         end
+                        when 200..299 then :light_green
+                        when 300..399 then :light_yellow
+                        when 400..499 then :light_red
+                        when 500..599 then :light_magenta
+                        else :white
+                        end
 
           separator = "=" * 100
           end_separator = "-" * 100
 
           output = []
-          output << ""
           output << separator.colorize(:light_cyan)
 
           # Main request line
@@ -130,10 +129,11 @@ module OmgLogs
           output << extras.join(" | ").colorize(:light_black) if extras.any?
 
           output << end_separator.colorize(:light_cyan)
-          output << ""
 
           output.join("\n")
         end
+
+
       end
     end
 
