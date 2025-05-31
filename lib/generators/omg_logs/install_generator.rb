@@ -50,6 +50,7 @@ module OmgLogs
           # This gem enhances Rails development logging with beautiful formatting,
           # method tracing, and noise filtering.
 
+          if Rails.env.development?
           OmgLogs.configure do |config|
             # Enable/disable specific features
             config.enable_method_tracing = true
@@ -75,6 +76,7 @@ module OmgLogs
             #   /your_custom_pattern/,
             #   /another_pattern/
             # ]
+          end
           end
 
           # The gem automatically configures Rails settings equivalent to:
