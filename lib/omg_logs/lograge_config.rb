@@ -105,11 +105,27 @@ module OmgLogs
             end
           end
 
+          # Redirects - Display prominently if any occurred
+          if data[:redirects] && data[:redirects].any?
+            output << "Redirects:".colorize(:light_magenta)
+            data[:redirects].each do |redirect|
+              timestamp = redirect[:timestamp] ? redirect[:timestamp].strftime('%H:%M:%S.%L') : 'unknown'
+              status_info = redirect[:status] ? " (#{redirect[:status]})" : ""
+              redirect_line = "  🔄 #{timestamp} - #{redirect[:called_from]} → #{redirect[:method]} → #{redirect[:destination]}#{status_info}"
+              output << redirect_line.colorize(:yellow)
+            end
+          end
+
           # Method calls
           if data[:method_calls] && data[:method_calls].any?
             output << "Methods Called:".colorize(:light_magenta)
             data[:method_calls].each do |call|
-              output << "  → #{call}".colorize(:cyan)
+              if call.include?('🔄 REDIRECT')
+                # Highlight redirects in method calls too
+                output << "  #{call}".colorize(:yellow)
+              else
+                output << "  → #{call}".colorize(:cyan)
+              end
             end
           end
 
@@ -149,7 +165,8 @@ module OmgLogs
           user_id: event.payload[:user_id],
           remote_ip: event.payload[:remote_ip],
           method_calls: Thread.current[:method_calls] || [],
-          rendered_templates: Thread.current[:rendered_templates] || []
+          rendered_templates: Thread.current[:rendered_templates] || [],
+          redirects: Thread.current[:redirects] || []
         }.compact
       end
     end

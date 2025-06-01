@@ -29,6 +29,7 @@ module OmgLogs
           Thread.current[:method_calls] = []
           Thread.current[:tracked_methods] = Set.new
           Thread.current[:before_action_methods] = Set.new
+          Thread.current[:redirects] = []
 
           Thread.current[:request_info] = {
             method: request.method,
@@ -91,8 +92,9 @@ module OmgLogs
             Thread.current[:tracked_methods].add(main_action)
           end
 
-          # Set up method tracking
+          # Set up method tracking and redirect intercepting
           setup_nested_method_tracking
+          setup_redirect_tracking
 
           yield
         ensure
@@ -103,6 +105,122 @@ module OmgLogs
           Thread.current[:current_method] = nil
           Thread.current[:tracked_methods] = nil
           Thread.current[:before_action_methods] = nil
+          Thread.current[:redirects] = nil
+        end
+
+        def setup_redirect_tracking
+          return if @redirect_tracking_setup
+
+          @redirect_tracking_setup = true
+
+          # Track various redirect methods
+          redirect_methods = [
+            :redirect_to, :redirect_back, :redirect_back_or_to,
+            :redirect_to_back_or_default, :redirect_back_or_default
+          ]
+
+          redirect_methods.each do |method_name|
+            next unless respond_to?(method_name, true)
+
+            begin
+              original_method = method(method_name)
+
+              define_singleton_method("#{method_name}_original_omg") do |*args, &block|
+                original_method.call(*args, &block)
+              end
+
+              define_singleton_method(method_name) do |*args, &block|
+                if Thread.current[:current_request_id]
+                  redirect_info = extract_redirect_info(method_name, args)
+                  current_method = Thread.current[:current_method] || "#{self.class.name}##{params[:action]}"
+
+                  redirect_entry = {
+                    method: method_name,
+                    destination: redirect_info[:destination],
+                    status: redirect_info[:status],
+                    called_from: current_method,
+                    timestamp: Time.current
+                  }
+
+                  Thread.current[:redirects] ||= []
+                  Thread.current[:redirects] << redirect_entry
+
+                  # Add to method calls for immediate visibility
+                  redirect_msg = "  🔄 REDIRECT: #{method_name} → #{redirect_info[:destination]}"
+                  redirect_msg += " (#{redirect_info[:status]})" if redirect_info[:status]
+                  Thread.current[:method_calls] << redirect_msg
+                end
+
+                send("#{method_name}_original_omg", *args, &block)
+              end
+            rescue StandardError => e
+              # Skip if method can't be tracked
+              next
+            end
+          end
+        end
+
+        def extract_redirect_info(method_name, args)
+          info = { destination: 'unknown', status: nil }
+
+          case method_name
+          when :redirect_to
+            if args.first.is_a?(Hash)
+              # Handle options hash
+              options = args.first
+              if options[:action]
+                info[:destination] = "#{options[:controller] || params[:controller]}##{options[:action]}"
+              elsif options[:controller]
+                info[:destination] = "#{options[:controller]}#index"
+              else
+                # Try to extract path/url
+                info[:destination] = extract_path_from_options(options)
+              end
+              info[:status] = options[:status] if options[:status]
+            elsif args.first.is_a?(String)
+              info[:destination] = args.first
+            elsif args.first.respond_to?(:to_s)
+              info[:destination] = args.first.to_s
+            end
+
+            # Check for status in second argument
+            if args[1].is_a?(Hash) && args[1][:status]
+              info[:status] = args[1][:status]
+            end
+
+          when :redirect_back
+            fallback = args.find { |arg| arg.is_a?(Hash) && arg[:fallback_location] }
+            if fallback
+              info[:destination] = "back (fallback: #{fallback[:fallback_location]})"
+            else
+              info[:destination] = "back"
+            end
+
+          when :redirect_back_or_to, :redirect_back_or_default
+            if args.first
+              info[:destination] = "back or #{args.first}"
+            else
+              info[:destination] = "back or default"
+            end
+
+          else
+            info[:destination] = args.first.to_s if args.first
+          end
+
+          info
+        end
+
+        def extract_path_from_options(options)
+          # Handle common Rails routing options
+          if options[:id] && options[:action]
+            "#{options[:action]}/#{options[:id]}"
+          elsif options[:path]
+            options[:path]
+          elsif options[:url]
+            options[:url]
+          else
+            options.inspect
+          end
         end
 
         def setup_nested_method_tracking
@@ -114,8 +232,9 @@ module OmgLogs
 
           controller_methods.each do |method_name|
             next if method_name.to_s.include?('_original')
-            next if [:trace_request_methods, :setup_nested_method_tracking].include?(method_name)
+            next if [:trace_request_methods, :setup_nested_method_tracking, :setup_redirect_tracking].include?(method_name)
             next if method_name.to_s.start_with?('_')
+            next if method_name.to_s.end_with?('_original_omg')
 
             begin
               original_method = method(method_name)
