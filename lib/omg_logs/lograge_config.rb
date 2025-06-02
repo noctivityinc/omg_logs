@@ -116,6 +116,17 @@ module OmgLogs
             end
           end
 
+          # Before Actions (if any were called)
+          if data[:before_actions_called] && data[:before_actions_called].any?
+            if OmgLogs.configuration.debug_mode
+              puts "🔍 [DEBUG] data[:before_actions_called]: #{data[:before_actions_called]}"
+            end
+            output << "Before Actions:".colorize(:light_cyan)
+            data[:before_actions_called].each do |action|
+              output << "  → #{action}".colorize(:cyan)
+            end
+          end
+
           # Method calls
           if data[:method_calls] && data[:method_calls].any?
             output << "Methods Called:".colorize(:light_magenta)
@@ -124,15 +135,15 @@ module OmgLogs
                 # Highlight redirects in method calls too
                 output << "  #{call}".colorize(:yellow)
               else
-                output << "  → #{call}".colorize(:cyan)
+                output << "  #{call}".colorize(:cyan)
               end
             end
           end
 
-          # Rendered templates
+          # Rendered templates (reverse order to show actual rendering sequence)
           if data[:rendered_templates] && data[:rendered_templates].any?
             output << "Templates Rendered:".colorize(:light_magenta)
-            data[:rendered_templates].each do |template|
+            data[:rendered_templates].reverse.each do |template|
               output << "  📄 #{template}".colorize(:light_green)
             end
           end
@@ -158,15 +169,27 @@ module OmgLogs
         params = event.payload[:params]
         clean_params = params ? params.except('controller', 'action', 'format').presence : nil
 
+        # Get data from request env (stored there before Thread cleanup)
+        request_env = event.payload[:request]&.env || {}
+        before_actions = request_env['omg_logs.before_actions_called'] || Thread.current[:before_actions_called] || []
+        method_calls = request_env['omg_logs.method_calls'] || Thread.current[:method_calls] || []
+        redirects = request_env['omg_logs.redirects'] || Thread.current[:redirects] || []
+
+        if OmgLogs.configuration.debug_mode
+          puts "🔍 [DEBUG] custom_options_proc - before_actions: #{before_actions}"
+          puts "🔍 [DEBUG] custom_options_proc - method_calls: #{method_calls}"
+        end
+
         {
           time: Time.current.strftime('%H:%M:%S'),
           format: event.payload[:format],
           params: clean_params,
           user_id: event.payload[:user_id],
           remote_ip: event.payload[:remote_ip],
-          method_calls: Thread.current[:method_calls] || [],
+          before_actions_called: before_actions,
+          method_calls: method_calls,
           rendered_templates: Thread.current[:rendered_templates] || [],
-          redirects: Thread.current[:redirects] || []
+          redirects: redirects
         }.compact
       end
     end

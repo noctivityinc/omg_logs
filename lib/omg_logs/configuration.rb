@@ -5,6 +5,7 @@ module OmgLogs
                   :enable_sql_logging,
                   :enable_lograge,
                   :enable_action_cable_filtering,
+                  :debug_mode,
                   :sql_log_file,
                   :action_cable_log_file,
                   :filter_patterns,
@@ -16,6 +17,7 @@ module OmgLogs
       @enable_sql_logging = true
       @enable_lograge = true
       @enable_action_cable_filtering = true
+      @debug_mode = false
 
       @sql_log_file = 'log/enhanced_sql.log'
       @action_cable_log_file = 'log/actioncable.log'

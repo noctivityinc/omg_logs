@@ -27,9 +27,10 @@ module OmgLogs
           Thread.current[:current_request_id] = request_id
           Thread.current[:rendered_templates] = []
           Thread.current[:method_calls] = []
+          Thread.current[:before_actions_called] = []
           Thread.current[:tracked_methods] = Set.new
-          Thread.current[:before_action_methods] = Set.new
           Thread.current[:redirects] = []
+          Thread.current[:call_depth] = 0
 
           Thread.current[:request_info] = {
             method: request.method,
@@ -43,20 +44,16 @@ module OmgLogs
 
           Thread.current[:current_method] = "#{self.class.name}##{params[:action]}"
 
-          # Track before_actions first
-          self.class._process_action_callbacks.each do |callback|
-            next unless callback.kind == :before && callback.filter.is_a?(Symbol)
+          # Get list of before_action method names for this controller
+          before_action_methods = get_before_action_methods
+          Thread.current[:before_action_methods] = before_action_methods
 
-            method_name = callback.filter
-            source_class = find_method_source_class(method_name)
-            method_sig = "#{source_class}##{method_name} (before_action)"
-
-            next if Thread.current[:tracked_methods].include?(method_sig)
-
-            Thread.current[:method_calls] << method_sig
-            Thread.current[:tracked_methods].add(method_sig)
-            Thread.current[:before_action_methods].add(method_name)
+          if OmgLogs.configuration.debug_mode
+            puts "🔍 [DEBUG] Before action methods for #{self.class.name}: #{before_action_methods}"
           end
+
+          # Store controller instance for callback condition checking
+          Thread.current[:controller_instance] = self
 
           # Subscribe to template rendering
           template_subscriber = ActiveSupport::Notifications.subscribe('render_template.action_view') do |name, start, finish, id, payload|
@@ -86,26 +83,124 @@ module OmgLogs
           # Track the main action
           action_name = params[:action]
           controller_name = self.class.name
-          main_action = "#{controller_name}##{action_name}"
-          unless Thread.current[:tracked_methods].include?(main_action)
-            Thread.current[:method_calls] << main_action
-            Thread.current[:tracked_methods].add(main_action)
-          end
+          main_action = "→ #{controller_name}##{action_name}"
+          Thread.current[:method_calls] << main_action
+          Thread.current[:tracked_methods].add(main_action)
+          Thread.current[:call_depth] = 1
 
           # Set up method tracking and redirect intercepting
           setup_nested_method_tracking
           setup_redirect_tracking
 
           yield
+
+          # Debug output before cleanup
+          if OmgLogs.configuration.debug_mode
+            puts "🔍 [DEBUG] Before actions captured: #{Thread.current[:before_actions_called]}"
+            puts "🔍 [DEBUG] Method calls captured: #{Thread.current[:method_calls]}"
+          end
+
+          # Store the data in the request for lograge to pick up later
+          if defined?(request) && request.respond_to?(:env)
+            request.env['omg_logs.before_actions_called'] = Thread.current[:before_actions_called] || []
+            request.env['omg_logs.method_calls'] = Thread.current[:method_calls] || []
+            request.env['omg_logs.redirects'] = Thread.current[:redirects] || []
+          end
         ensure
           ActiveSupport::Notifications.unsubscribe(template_subscriber) if template_subscriber
           ActiveSupport::Notifications.unsubscribe(partial_subscriber) if partial_subscriber
+
           Thread.current[:current_request_id] = nil
           Thread.current[:request_info] = nil
           Thread.current[:current_method] = nil
           Thread.current[:tracked_methods] = nil
-          Thread.current[:before_action_methods] = nil
+          Thread.current[:before_actions_called] = nil
           Thread.current[:redirects] = nil
+          Thread.current[:call_depth] = nil
+          Thread.current[:controller_instance] = nil
+          Thread.current[:before_action_methods] = nil
+        end
+
+        def get_before_action_methods
+          before_actions = []
+          current_action = params[:action]
+
+          self.class._process_action_callbacks.each do |callback|
+            if callback.kind == :before && callback.filter.is_a?(Symbol)
+              # Check if this callback should run for the current action
+              should_run = true
+
+              # Try to check conditions if the callback has them
+              begin
+                if callback.respond_to?(:options) && callback.options
+                  # Check :only condition
+                  if callback.options[:only]
+                    should_run = Array(callback.options[:only]).map(&:to_s).include?(current_action)
+                  end
+
+                  # Check :except condition
+                  if should_run && callback.options[:except]
+                    should_run = !Array(callback.options[:except]).map(&:to_s).include?(current_action)
+                  end
+                end
+              rescue StandardError => e
+                if OmgLogs.configuration.debug_mode
+                  puts "🔍 [DEBUG] Could not check callback conditions: #{e.message}"
+                end
+                # If we can't check conditions, assume it should run
+                should_run = true
+              end
+
+              if should_run
+                before_actions << callback.filter
+              end
+            end
+          end
+
+          if OmgLogs.configuration.debug_mode
+            puts "🔍 [DEBUG] Filtered before_actions for #{current_action}: #{before_actions}"
+          end
+          before_actions
+        end
+
+        def setup_before_action_tracking
+          # Track before_actions by wrapping each one individually
+          self.class._process_action_callbacks.each do |callback|
+            next unless callback.kind == :before && callback.filter.is_a?(Symbol)
+
+            method_name = callback.filter
+            next unless respond_to?(method_name, true)
+            next if method_name.to_s.end_with?('_original_omg_before')
+
+            begin
+              # Store the original method
+              original_method = method(method_name)
+
+              # Create a backup method name
+              backup_method_name = "#{method_name}_original_omg_before"
+              define_singleton_method(backup_method_name) do |*args, &block|
+                original_method.call(*args, &block)
+              end
+
+              # Override the before_action method to track when it's called
+              define_singleton_method(method_name) do |*args, &block|
+                if Thread.current[:current_request_id]
+                  method_sig = "#{self.class.name}##{method_name} (before_action)"
+                  unless Thread.current[:tracked_methods].include?(method_sig)
+                    Thread.current[:before_actions_called] << method_sig
+                    Thread.current[:tracked_methods].add(method_sig)
+                    puts "🔍 [DEBUG] ACTUALLY EXECUTED before_action: #{method_sig}"
+                  end
+                end
+
+                # Call the original method
+                send(backup_method_name, *args, &block)
+              end
+            rescue StandardError => e
+              puts "🔍 [DEBUG] Failed to track before_action #{method_name}: #{e.message}"
+              next
+            end
+          end
         end
 
         def setup_redirect_tracking
@@ -232,9 +327,10 @@ module OmgLogs
 
           controller_methods.each do |method_name|
             next if method_name.to_s.include?('_original')
-            next if [:trace_request_methods, :setup_nested_method_tracking, :setup_redirect_tracking].include?(method_name)
+            next if [:trace_request_methods, :setup_nested_method_tracking, :setup_redirect_tracking, :setup_before_action_tracking].include?(method_name)
             next if method_name.to_s.start_with?('_')
             next if method_name.to_s.end_with?('_original_omg')
+            next if method_name.to_s.end_with?('_original_omg_before')
 
             begin
               original_method = method(method_name)
@@ -244,17 +340,57 @@ module OmgLogs
               end
 
               define_singleton_method(method_name) do |*args, &block|
-                if Thread.current[:method_calls] && Thread.current[:current_request_id] && !Thread.current[:before_action_methods]&.include?(method_name)
-                  method_sig = "  → #{self.class.name}##{method_name}"
-                  unless Thread.current[:tracked_methods].include?(method_sig)
-                    Thread.current[:method_calls] << method_sig
-                    Thread.current[:tracked_methods].add(method_sig)
-                    Thread.current[:current_method] = "#{self.class.name}##{method_name}"
-                    Thread.current[:request_info][:current_method] = "#{self.class.name}##{method_name}"
+                if Thread.current[:method_calls] && Thread.current[:current_request_id]
+                  # Skip tracking the main action since we already tracked it
+                  action_name = Thread.current[:request_info][:action]
+                  unless method_name.to_s == action_name
+                    # Check if this is a before_action
+                    before_action_methods = Thread.current[:before_action_methods] || []
+                    before_action_sig = "#{self.class.name}##{method_name} (before_action)"
+
+                    # Only treat it as a before_action if:
+                    # 1. It's in the before_action list, AND
+                    # 2. We haven't already tracked it as a before_action, AND
+                    # 3. We're at call depth 1 (meaning we're not inside another method)
+                    if before_action_methods.include?(method_name) &&
+                       !Thread.current[:tracked_methods].include?(before_action_sig) &&
+                       Thread.current[:call_depth] == 1
+
+                      # This is a before_action being called by Rails
+                      unless Thread.current[:tracked_methods].include?(before_action_sig)
+                        Thread.current[:before_actions_called] << before_action_sig
+                        Thread.current[:tracked_methods].add(before_action_sig)
+                        if OmgLogs.configuration.debug_mode
+                          puts "🔍 [DEBUG] FOUND before_action: #{before_action_sig}"
+                        end
+                      end
+                    else
+                      # This is a regular method call (or a before_action being called manually)
+                      indent = "→ " * (Thread.current[:call_depth] || 1)
+                      method_sig = "#{indent}#{self.class.name}##{method_name}"
+                      unless Thread.current[:tracked_methods].include?(method_sig)
+                        Thread.current[:method_calls] << method_sig
+                        Thread.current[:tracked_methods].add(method_sig)
+                        if OmgLogs.configuration.debug_mode
+                          puts "🔍 [DEBUG] Tracked regular method: #{method_sig}"
+                        end
+                      end
+                    end
                   end
+
+                  Thread.current[:current_method] = "#{self.class.name}##{method_name}"
+                  Thread.current[:request_info][:current_method] = "#{self.class.name}##{method_name}"
                 end
 
-                send("#{method_name}_original", *args, &block)
+                # Increase call depth for nested calls
+                Thread.current[:call_depth] = (Thread.current[:call_depth] || 1) + 1
+
+                result = send("#{method_name}_original", *args, &block)
+
+                # Decrease call depth when returning
+                Thread.current[:call_depth] = (Thread.current[:call_depth] || 1) - 1
+
+                result
               end
             rescue StandardError => e
               next
