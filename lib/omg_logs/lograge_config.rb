@@ -83,15 +83,18 @@ module OmgLogs
           output = []
           output << separator.colorize(:light_cyan)
 
-          # Main request line
+          # Main request line - use total_duration if available, fallback to duration
+          duration_to_show = data[:total_duration] || data[:duration]
+          formatted_duration = duration_to_show ? "%.2f" % duration_to_show : "0.00"
           format_info = data[:format] ? " (#{data[:format]})" : ""
-          main_line = "#{data[:method]} #{data[:path]}#{format_info} | #{data[:controller]}##{data[:action]} | #{data[:status]} | #{data[:duration]}ms"
+          main_line = "#{data[:method]} #{data[:path]}#{format_info} | #{data[:controller]}##{data[:action]} | #{data[:status]} | #{formatted_duration}ms (TOTAL)"
           output << main_line.colorize(status_color)
 
-          # Performance details
+          # Performance details - show breakdown
           perf_details = []
-          perf_details << "View: #{data[:view]}ms" if data[:view]
-          perf_details << "DB: #{data[:db]}ms" if data[:db]
+          perf_details << "Controller: #{'%.2f' % data[:duration]}ms" if data[:duration] # Original controller time
+          perf_details << "View: #{'%.2f' % data[:view]}ms" if data[:view]
+          perf_details << "DB: #{'%.2f' % data[:db]}ms" if data[:db]
           perf_details << "Allocations: #{data[:allocations]}" if data[:allocations]
           output << perf_details.join(" | ").colorize(:light_blue) if perf_details.any?
 
@@ -151,7 +154,11 @@ module OmgLogs
           # Additional info
           extras = []
           extras << "Time: #{data[:time]}" if data[:time]
-          extras << "User: #{data[:user_id]}" if data[:user_id]
+          if data[:current_user_info]
+            user_label = data[:current_user_info][:label] || 'User'
+            user_id = data[:current_user_info][:id]
+            extras << "#{user_label}: #{user_id}" if user_id
+          end
           extras << "IP: #{data[:remote_ip]}" if data[:remote_ip]
           output << extras.join(" | ").colorize(:light_black) if extras.any?
 
@@ -169,6 +176,12 @@ module OmgLogs
         params = event.payload[:params]
         clean_params = params ? params.except('controller', 'action', 'format').presence : nil
 
+        # Calculate total duration (controller + view + any other processing)
+        total_duration = event.duration
+
+        # Get current user info using configured method
+        current_user_info = extract_current_user_info(event.payload[:request])
+
         # Get data from request env (stored there before Thread cleanup)
         request_env = event.payload[:request]&.env || {}
         before_actions = request_env['omg_logs.before_actions_called'] || Thread.current[:before_actions_called] || []
@@ -178,19 +191,78 @@ module OmgLogs
         if OmgLogs.configuration.debug_mode
           puts "🔍 [DEBUG] custom_options_proc - before_actions: #{before_actions}"
           puts "🔍 [DEBUG] custom_options_proc - method_calls: #{method_calls}"
+          puts "🔍 [DEBUG] total_duration: #{total_duration}ms"
+          puts "🔍 [DEBUG] current_user_info: #{current_user_info}"
         end
 
         {
           time: Time.current.strftime('%H:%M:%S'),
           format: event.payload[:format],
           params: clean_params,
-          user_id: event.payload[:user_id],
+          current_user_info: current_user_info,
           remote_ip: event.payload[:remote_ip],
           before_actions_called: before_actions,
           method_calls: method_calls,
           rendered_templates: Thread.current[:rendered_templates] || [],
-          redirects: redirects
+          redirects: redirects,
+          total_duration: total_duration
         }.compact
+      end
+    end
+
+    def self.extract_current_user_info(request)
+      return nil unless OmgLogs.configuration.current_user_method
+      return nil unless request
+
+      begin
+        # Try to get the controller instance from the request
+        controller = request.env['action_controller.instance']
+        return nil unless controller
+
+        # Split the method path (e.g., "Current.professional" -> ["Current", "professional"])
+        method_path = OmgLogs.configuration.current_user_method.split('.')
+
+        current_object = nil
+
+        # Handle different starting points
+        case method_path.first
+        when 'Current'
+          # For Current.professional, Current.account, etc.
+          current_object = Current if defined?(Current)
+        when 'current_user'
+          # For current_user.account, etc.
+          current_object = controller.current_user if controller.respond_to?(:current_user)
+        else
+          # Direct method call on controller (e.g., "current_professional")
+          if method_path.length == 1 && controller.respond_to?(method_path.first)
+            user_object = controller.send(method_path.first)
+            return {
+              id: user_object&.id,
+              label: OmgLogs.configuration.current_user_label || 'User'
+            }
+          end
+        end
+
+        return nil unless current_object
+
+        # Navigate through the method path
+        method_path[1..-1].each do |method_name|
+          break unless current_object.respond_to?(method_name)
+          current_object = current_object.send(method_name)
+          break if current_object.nil?
+        end
+
+        if current_object&.respond_to?(:id)
+          {
+            id: current_object.id,
+            label: OmgLogs.configuration.current_user_label || 'User'
+          }
+        end
+      rescue StandardError => e
+        if OmgLogs.configuration.debug_mode
+          puts "🔍 [DEBUG] Failed to extract current user: #{e.message}"
+        end
+        nil
       end
     end
 

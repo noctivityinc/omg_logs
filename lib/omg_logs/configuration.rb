@@ -9,7 +9,9 @@ module OmgLogs
                   :sql_log_file,
                   :action_cable_log_file,
                   :filter_patterns,
-                  :performance_thresholds
+                  :performance_thresholds,
+                  :current_user_method,
+                  :current_user_label
 
     def initialize
       @enable_method_tracing = true
@@ -21,6 +23,8 @@ module OmgLogs
 
       @sql_log_file = 'log/enhanced_sql.log'
       @action_cable_log_file = 'log/actioncable.log'
+      @current_user_method = nil  # Will use Current.professional.id if set to 'Current.professional'
+      @current_user_label = 'Account'  # Label to show in logs (e.g., 'Professional', 'Account', 'User')
 
       @filter_patterns = default_filter_patterns
       @performance_thresholds = default_performance_thresholds
