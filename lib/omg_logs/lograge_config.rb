@@ -48,24 +48,30 @@ module OmgLogs
           controller = data[:controller] || ''
           action = data[:action] || ''
 
-          # Filter out ActionCable/Turbo
-          return '' if should_skip_controller?(controller, action)
+          # Use configured filter patterns instead of hardcoded ones
+          return '' if should_skip_based_on_filter_patterns?(controller, action)
 
           format_request_log(data)
         end
 
         private
 
-        def should_skip_controller?(controller, action)
-          skip_patterns = [
-            'Turbo::', 'StreamsChannel', 'ActionCable',
-            'ApplicationCable', 'Connection'
-          ]
+        def should_skip_based_on_filter_patterns?(controller, action)
+          # Use the configured filter patterns from OmgLogs.configuration
+          filter_patterns = OmgLogs.configuration.filter_patterns || []
 
-          skip_actions = ['subscribe', 'unsubscribe', 'connect']
+          combined_text = "#{controller} #{action}"
 
-          skip_patterns.any? { |pattern| controller.include?(pattern) } ||
-            skip_actions.any? { |action_name| action.include?(action_name) }
+          filter_patterns.any? do |pattern|
+            case pattern
+            when Regexp
+              combined_text.match?(pattern)
+            when String
+              combined_text.include?(pattern)
+            else
+              false
+            end
+          end
         end
 
         def format_request_log(data)
@@ -166,8 +172,6 @@ module OmgLogs
 
           output.join("\n")
         end
-
-
       end
     end
 
@@ -270,13 +274,23 @@ module OmgLogs
       lambda do |event|
         controller = event.payload[:controller_class] || event.payload[:controller] || ''
         controller_str = controller.to_s
+        action = event.payload[:action] || ''
 
-        ignore_patterns = [
-          'Turbo::', 'StreamsChannel', 'ActionCable',
-          'ApplicationCable', 'Connection'
-        ]
+        # Use configured filter patterns instead of hardcoded ones
+        filter_patterns = OmgLogs.configuration.filter_patterns || []
 
-        ignore_patterns.any? { |pattern| controller_str.include?(pattern) }
+        combined_text = "#{controller_str} #{action}"
+
+        filter_patterns.any? do |pattern|
+          case pattern
+          when Regexp
+            combined_text.match?(pattern)
+          when String
+            combined_text.include?(pattern)
+          else
+            false
+          end
+        end
       end
     end
   end
