@@ -93,7 +93,11 @@ module OmgLogs
           duration_to_show = data[:total_duration] || data[:duration]
           formatted_duration = duration_to_show ? "%.2f" % duration_to_show : "0.00"
           format_info = data[:format] ? " (#{data[:format]})" : ""
-          main_line = "#{data[:method]} #{data[:path]}#{format_info} | #{data[:controller]}##{data[:action]} | #{data[:status]} | #{formatted_duration}ms (TOTAL)"
+
+          # For Turbo::StreamsChannel, extract and show the stream name
+          stream_info = extract_stream_info(data)
+
+          main_line = "#{data[:method]} #{data[:path]}#{format_info} | #{data[:controller]}##{data[:action]}#{stream_info} | #{data[:status]} | #{formatted_duration}ms (TOTAL)"
           output << main_line.colorize(status_color)
 
           # Performance details - show breakdown
@@ -172,13 +176,43 @@ module OmgLogs
 
           output.join("\n")
         end
+
+        # Extract stream information for ActionCable/Turbo channels
+        def extract_stream_info(data)
+          return "" unless data[:controller]&.include?('StreamsChannel')
+
+          # Look for stream name in params
+          if data[:params]
+            if data[:params]['signed_stream_name']
+              # Decode the signed stream name to show what stream this is
+              begin
+                decoded = Rails.application.message_verifier(:signed_stream_name).verify(data[:params]['signed_stream_name'])
+                return " [Stream: #{decoded.colorize(:light_cyan)}]"
+              rescue StandardError
+                return " [Stream: #{data[:params]['signed_stream_name'][0..20]}...]"
+              end
+            elsif data[:params]['stream_name']
+              return " [Stream: #{data[:params]['stream_name'].colorize(:light_cyan)}]"
+            elsif data[:params]['channel']
+              return " [Channel: #{data[:params]['channel'].colorize(:light_cyan)}]"
+            end
+          end
+
+          ""
+        end
       end
     end
 
     def self.create_custom_options_proc
       lambda do |event|
         params = event.payload[:params]
-        clean_params = params ? params.except('controller', 'action', 'format').presence : nil
+
+        # For ActionCable channels, preserve the stream-related params
+        if event.payload[:controller]&.include?('StreamsChannel')
+          clean_params = params ? params.except('controller', 'action', 'format').presence : nil
+        else
+          clean_params = params ? params.except('controller', 'action', 'format').presence : nil
+        end
 
         # Calculate total duration (controller + view + any other processing)
         total_duration = event.duration
