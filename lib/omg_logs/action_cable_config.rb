@@ -208,7 +208,7 @@ module OmgLogs
           end
 
           # Log to multiple destinations
-          log_broadcast_message(broadcast_logger, log_message)
+          OmgLogs::ActionCableConfig.log_broadcast_message(broadcast_logger, log_message)
 
           # Call the original method
           original_method.call(stream_name, **options)
@@ -222,9 +222,6 @@ module OmgLogs
       # Try to enhance the ActionBroadcastJob to log actual execution
       if defined?(Turbo::Streams::ActionBroadcastJob)
         puts "🔍 [DEBUG] Enhancing Turbo::Streams::ActionBroadcastJob"
-
-        # Create a shared broadcast logger for jobs
-        broadcast_logger = create_broadcast_logger
 
         Turbo::Streams::ActionBroadcastJob.class_eval do
           def perform(stream, action:, target:, **rendering)
