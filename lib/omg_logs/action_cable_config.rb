@@ -224,43 +224,60 @@ module OmgLogs
         puts "🔍 [DEBUG] Enhancing Turbo::Streams::ActionBroadcastJob"
 
         Turbo::Streams::ActionBroadcastJob.class_eval do
-          def perform(stream, action:, target:, **rendering)
-            execution_message = "🚀 [EXECUTING] Broadcasting #{action} to stream '#{stream}' (target: #{target})"
+          # Store the original perform method if it exists
+          unless method_defined?(:perform_original_omg)
+            if method_defined?(:perform)
+              alias_method :perform_original_omg, :perform
+            end
 
-            # Log execution start
-            OmgLogs::ActionCableConfig.log_broadcast_message(
-              OmgLogs::ActionCableConfig.create_broadcast_logger,
-              execution_message
-            )
+            def perform(stream, action:, target:, **rendering)
+              execution_message = "🚀 [EXECUTING] Broadcasting #{action} to stream '#{stream}' (target: #{target})"
 
-            begin
-              super
-
-              # Log successful completion
-              completion_message = "✅ [COMPLETED] Broadcast #{action} to stream '#{stream}' completed"
+              # Log execution start
               OmgLogs::ActionCableConfig.log_broadcast_message(
                 OmgLogs::ActionCableConfig.create_broadcast_logger,
-                completion_message
+                execution_message
               )
-            rescue StandardError => e
-              # CRITICAL: Log errors prominently with full details
-              error_message = "❌ [FAILED] Broadcast #{action} to stream '#{stream}' FAILED!"
-              error_details = "💥 ERROR: #{e.class}: #{e.message}"
-              error_backtrace = "🔍 BACKTRACE:\n#{e.backtrace.join("\n")}"
 
-              # Log to multiple destinations to ensure visibility
-              [error_message, error_details, error_backtrace].each do |msg|
+              begin
+                # Call the original method if it exists, otherwise use the basic broadcast logic
+                if respond_to?(:perform_original_omg)
+                  perform_original_omg(stream, action: action, target: target, **rendering)
+                else
+                  # Fallback to basic ActionCable broadcast if original method doesn't exist
+                  ActionCable.server.broadcast(stream, {
+                    action: action,
+                    target: target,
+                    **rendering
+                  })
+                end
+
+                # Log successful completion
+                completion_message = "✅ [COMPLETED] Broadcast #{action} to stream '#{stream}' completed"
                 OmgLogs::ActionCableConfig.log_broadcast_message(
                   OmgLogs::ActionCableConfig.create_broadcast_logger,
-                  msg
+                  completion_message
                 )
+              rescue StandardError => e
+                # CRITICAL: Log errors prominently with full details
+                error_message = "❌ [FAILED] Broadcast #{action} to stream '#{stream}' FAILED!"
+                error_details = "💥 ERROR: #{e.class}: #{e.message}"
+                error_backtrace = "🔍 BACKTRACE:\n#{e.backtrace.join("\n")}"
+
+                # Log to multiple destinations to ensure visibility
+                [error_message, error_details, error_backtrace].each do |msg|
+                  OmgLogs::ActionCableConfig.log_broadcast_message(
+                    OmgLogs::ActionCableConfig.create_broadcast_logger,
+                    msg
+                  )
+                end
+
+                # Also ensure it goes to Rails error logging
+                Rails.logger.error("#{error_message}\n#{error_details}\n#{error_backtrace}") if defined?(Rails.logger)
+
+                # Re-raise the error so it still gets handled by the job queue
+                raise e
               end
-
-              # Also ensure it goes to Rails error logging
-              Rails.logger.error("#{error_message}\n#{error_details}\n#{error_backtrace}") if defined?(Rails.logger)
-
-              # Re-raise the error so it still gets handled by the job queue
-              raise e
             end
           end
         end
