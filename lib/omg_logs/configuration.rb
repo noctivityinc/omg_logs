@@ -8,6 +8,7 @@ module OmgLogs
                   :debug_mode,
                   :sql_log_file,
                   :action_cable_log_file,
+                  :turbo_broadcast_log_file,
                   :filter_patterns,
                   :performance_thresholds,
                   :current_user_method,
@@ -23,6 +24,7 @@ module OmgLogs
 
       @sql_log_file = 'log/enhanced_sql.log'
       @action_cable_log_file = 'log/actioncable.log'
+      @turbo_broadcast_log_file = 'log/turbo_broadcasts.log'
       @current_user_method = nil  # Will use Current.professional.id if set to 'Current.professional'
       @current_user_label = 'Account'  # Label to show in logs (e.g., 'Professional', 'Account', 'User')
 

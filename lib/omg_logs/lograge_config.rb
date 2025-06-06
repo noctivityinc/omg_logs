@@ -39,6 +39,45 @@ module OmgLogs
         config.lograge.formatter = formatter_class.new
         config.lograge.custom_options = custom_options_proc
         config.lograge.ignore_custom = ignore_proc
+
+        # CRITICAL: Ensure errors are never filtered out
+        config.lograge.ignore_actions = []
+        config.lograge.ignore_nothing = true
+      end
+
+      # Setup additional error logging to ensure nothing is missed
+      setup_error_logging
+    end
+
+    def self.setup_error_logging
+      # Subscribe to Rails error notifications
+      ActiveSupport::Notifications.subscribe('process_action.action_controller') do |name, start, finish, id, payload|
+        if payload[:exception]
+          exception_class, exception_message = payload[:exception]
+          error_msg = "❌ [CONTROLLER ERROR] #{payload[:controller]}##{payload[:action]}: #{exception_class}: #{exception_message}"
+
+          Rails.logger.error(error_msg)
+          puts error_msg
+          $stderr.puts error_msg
+        end
+      end
+
+      # Subscribe to job error notifications if available
+      if defined?(ActiveJob)
+        ActiveSupport::Notifications.subscribe('perform.active_job') do |name, start, finish, id, payload|
+          if payload[:exception_object]
+            exception = payload[:exception_object]
+            error_msg = "❌ [JOB ERROR] #{payload[:job].class}: #{exception.class}: #{exception.message}"
+            error_backtrace = exception.backtrace.join("\n")
+
+            Rails.logger.error("#{error_msg}\n#{error_backtrace}")
+            puts "=" * 100
+            puts error_msg
+            puts error_backtrace
+            puts "=" * 100
+            $stderr.puts "#{error_msg}\n#{error_backtrace}"
+          end
+        end
       end
     end
 
@@ -181,23 +220,13 @@ module OmgLogs
         def extract_stream_info(data)
           return "" unless data[:controller]&.include?('StreamsChannel')
 
-          # Look for stream name in params
-          if data[:params]
-            if data[:params]['signed_stream_name']
-              # Decode the signed stream name to show what stream this is
-              begin
-                decoded = Rails.application.message_verifier(:signed_stream_name).verify(data[:params]['signed_stream_name'])
-                return " [Stream: #{decoded.colorize(:light_cyan)}]"
-              rescue StandardError
-                return " [Stream: #{data[:params]['signed_stream_name'][0..20]}...]"
-              end
-            elsif data[:params]['stream_name']
-              return " [Stream: #{data[:params]['stream_name'].colorize(:light_cyan)}]"
-            elsif data[:params]['channel']
-              return " [Channel: #{data[:params]['channel'].colorize(:light_cyan)}]"
-            end
+          # Get from Thread storage (set by enhanced ActionCable logging)
+          if Thread.current[:turbo_stream_name]
+            return " [Stream: #{Thread.current[:turbo_stream_name].colorize(:light_cyan)}]"
           end
 
+          # For ActionCable, we won't have params in the lograge data since it's WebSocket
+          # The Thread storage approach above should work
           ""
         end
       end
@@ -207,9 +236,9 @@ module OmgLogs
       lambda do |event|
         params = event.payload[:params]
 
-        # For ActionCable channels, preserve the stream-related params
+        # For ActionCable channels, preserve ALL params to debug stream info
         if event.payload[:controller]&.include?('StreamsChannel')
-          clean_params = params ? params.except('controller', 'action', 'format').presence : nil
+          clean_params = params # Keep everything for debugging
         else
           clean_params = params ? params.except('controller', 'action', 'format').presence : nil
         end
@@ -231,6 +260,9 @@ module OmgLogs
           puts "🔍 [DEBUG] custom_options_proc - method_calls: #{method_calls}"
           puts "🔍 [DEBUG] total_duration: #{total_duration}ms"
           puts "🔍 [DEBUG] current_user_info: #{current_user_info}"
+          if event.payload[:controller]&.include?('StreamsChannel')
+            puts "🔍 [DEBUG] StreamsChannel event payload: #{event.payload.inspect}"
+          end
         end
 
         {
